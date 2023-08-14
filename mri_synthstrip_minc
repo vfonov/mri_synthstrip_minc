@@ -3,7 +3,9 @@
 import os
 import sys
 import argparse
-import scipy
+#import scipy
+from scipy.ndimage  import label
+import minc.io
 
 ref = '''
 If you use SynthStrip in your analysis, please cite:
@@ -15,6 +17,9 @@ https://doi.org/10.1016/j.neuroimage.2022.119474
 
 Website: https://w3id.org/synthstrip
 '''
+
+_history=minc.io.format_history(sys.argv)
+
 
 # parse command line
 parser = argparse.ArgumentParser()
@@ -36,11 +41,14 @@ args = parser.parse_args()
 import torch
 import torch.nn as nn
 import numpy as np
-import surfa as sf
+#import surfa as sf
+
+
+
 
 # sanity check on the inputs
 if not args.out and not args.mask:
-    sf.system.fatal('Must provide at least --out or --mask output flags.')
+    assert False,'Must provide at least --out or --mask output flags.'
 
 # necessary for speed gains (I think)
 torch.backends.cudnn.benchmark = True
@@ -55,6 +63,8 @@ else:
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     device = torch.device('cpu')
     device_name = 'CPU'
+
+
 
 # configure model
 print(f'Configuring model on the {device_name}')
@@ -163,7 +173,6 @@ class StripModel(nn.Module):
         # remaining convs at full resolution
         for conv in self.remaining:
             x = conv(x)
-
         return x
 
 class ConvBlock(nn.Module):
@@ -199,72 +208,97 @@ if args.model is not None:
     modelfile = args.model
     print('Using custom model weights')
 else:
-    version = '1'
+    version = '1 minc'
     print(f'Running SynthStrip model version {version}')
-    fshome = os.environ.get('FREESURFER_HOME')
-    if fshome is None:
-        sf.system.fatal('FREESURFER_HOME env variable must be set! Make sure FreeSurfer is properly sourced.')
-    if args.no_csf:
-        print('Excluding CSF from brain boundary')
-        modelfile = os.path.join(fshome, 'models', f'synthstrip.nocsf.{version}.pt')
-    else:
-        modelfile = os.path.join(fshome, 'models', f'synthstrip.{version}.pt')
+    assert False, "Not ready yet"
+    #fshome = os.environ.get('FREESURFER_HOME')
+    # if fshome is None:
+    #     sf.system.fatal('FREESURFER_HOME env variable must be set! Make sure FreeSurfer is properly sourced.')
+    # if args.no_csf:
+    #     print('Excluding CSF from brain boundary')
+    #     modelfile = os.path.join(fshome, 'models', f'synthstrip.nocsf.{version}.pt')
+    # else:
+    #     modelfile = os.path.join(fshome, 'models', f'synthstrip.{version}.pt')
 checkpoint = torch.load(modelfile, map_location=device)
 model.load_state_dict(checkpoint['model_state_dict'])
 
+
 # load input volume
-image = sf.load_volume(args.image)
+
+image,aff = minc.io.load_minc_volume(args.image,as_byte=False)
+
 print(f'Input image read from: {args.image}')
 
 # loop over frames (try not to keep too much data in memory)
-print(f'Processing frame (of {image.nframes}):', end=' ', flush=True)
+#print(f'Processing frame (of {image.nframes}):', end=' ', flush=True)
 mask = []
-for f in range(image.nframes):
-    print(f + 1, end=' ', flush=True)
-    frame = image.new(image.framed_data[..., f])
+for f in [1]: # HACK 
+    #print(f + 1, end=' ', flush=True)
+    #frame = image.new(image.framed_data[..., f])
+    frame=image
 
     # conform image and fit to shape with factors of 64
-    conformed = frame.conform(voxsize=1.0, dtype='float32', method='nearest', orientation='LIA').crop_to_bbox()
-    target_shape = np.clip(np.ceil(np.array(conformed.shape[:3]) / 64).astype(int) * 64, 192, 320)
-    conformed = conformed.reshape(target_shape)
+    #conformed = frame.conform(voxsize=1.0, dtype='float32', method='nearest', orientation='LIA').crop_to_bbox()
+    #target_shape = np.clip(np.ceil(np.array(conformed.shape[:3]) / 64).astype(int) * 64, 192, 320)
+    #conformed = conformed.reshape(target_shape)
+    # TODO
+    target_shape = np.clip(np.ceil(np.array(frame.shape[:3]) / 64).astype(int) * 64, 192, 320)
+    if np.any(target_shape != frame.shape[:3]):
+        conformed = np.zeros(target_shape, dtype='float32')
+        conformed[:frame.shape[0], :frame.shape[1], :frame.shape[2]] = frame
+    else:
+        conformed = frame.astype('float32') # to be compatible with spatial expectation of the model
+
+    # HACK: convert to freesurfer format
+    conformed=conformed.transpose([2,0,1])[:,::-1,:].copy()
+
 
     # normalize intensities
     conformed -= conformed.min()
-    conformed = (conformed / conformed.percentile(99)).clip(0, 1)
+    conformed = np.clip(conformed / np.percentile(conformed,99),0, 1)
 
     # predict the surface distance transform
     with torch.no_grad():
-        input_tensor = torch.from_numpy(conformed.data[np.newaxis, np.newaxis]).to(device)
+        input_tensor = torch.from_numpy(conformed[np.newaxis, np.newaxis,:,:,:]).to(device)
         sdt = model(input_tensor).cpu().numpy().squeeze()
 
     max_dist = sdt.max().astype(int)
     if args.border >= max_dist:
-        print(f'specified border {args.border} greater than max dtrans {max_dist} - computing sdt')
-        dif = args.border - (max_dist-1)
-        mask1 = (sdt >= (max_dist-1))  # region that original sdt has real distances
-        dtrans = scipy.ndimage.morphology.distance_transform_edt(mask1) + (max_dist-2)
-        sdt = dtrans  # negative interior distances are lost, but doesn't matter
-
+        # print(f'specified border {args.border} greater than max dtrans {max_dist} - computing sdt')
+        # dif = args.border - (max_dist-1)
+        # mask1 = (sdt >= (max_dist-1))  # region that original sdt has real distances
+        # dtrans = scipy.ndimage.morphology.distance_transform_edt(mask1) + (max_dist-2)
+        # sdt = dtrans  # negative interior distances are lost, but doesn't matter
+        assert False, "Disabled"
 
     # unconform the sdt and extract mask
-    sdt = conformed.new(sdt).resample_like(image, fill=100)
-
+    #sdt = conformed.new(sdt).resample_like(image, fill=100) #  TODO
+    
     # find largest CC to be safe
-    mask.append((sdt < args.border).connected_component_mask(k=1, fill=True))
+    structure = np.ones((3, 3, 3), dtype=np.int32)
+    labeled, ncomponents = label((sdt < args.border), structure)
 
-# combine frames and end line
-mask = sf.stack(mask)
-print('done')
+    mask.append(labeled==1)
+
+# 2,0,1
+mask=mask[0][:,::-1,:].transpose([1,2,0]).copy()
+#print('done')
+
+if np.any(target_shape != frame.shape[:3]):
+    # unpad
+    mask=mask[:frame.shape[0], :frame.shape[1], :frame.shape[2]]
 
 # write the masked output
 if args.out:
     image[mask == 0] = np.min([0, image.min()])
-    image.save(args.out)
+    minc.io.save_minc_volume(image, args.out, aff=aff, history=_history)
+    #image.save(args.out)
     print(f'Masked image saved to: {args.out}')
 
 # write the brain mask
 if args.mask:
-    image.new(mask).save(args.mask)
+    #mask = torch.from_numpy(mask.astype(np.uint8))
+    minc.io.save_minc_volume( args.mask, mask.astype(np.uint8), aff=aff, history=_history,as_byte=True)
     print(f'Binary brain mask saved to: {args.mask}')
 
 print(ref)
