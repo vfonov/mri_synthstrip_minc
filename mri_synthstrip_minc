@@ -291,14 +291,14 @@ if args.export is None:
     # write the masked output
     if args.out:
         image[mask == 0] = np.min([0, image.min()])
-        minc.io.save_minc_volume(image, args.out, aff=aff, history=_history)
+        minc.io.save_minc_volume(image, args.out, aff=aff, history=_history,ref_fname=args.image)
         #image.save(args.out)
         print(f'Masked image saved to: {args.out}')
 
     # write the brain mask
     if args.mask:
         #mask = torch.from_numpy(mask.astype(np.uint8))
-        minc.io.save_minc_volume( args.mask, mask.astype(np.uint8), aff=aff, history=_history,as_byte=True)
+        minc.io.save_minc_volume( args.mask, mask.astype(np.uint8), aff=aff, history=_history,ref_fname=args.image)
         print(f'Binary brain mask saved to: {args.mask}')
 else:
     # convert to OpenVino IR
