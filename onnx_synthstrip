@@ -10,6 +10,12 @@ import numpy as np
 from minc.io import *
 from minc.geo import *
 
+try:
+    from minc.nifti import *
+    _have_nifti=True
+except ImportError:
+    _have_nifti=False
+
 import onnxruntime
 
 def apply_synthstrip(input_scan, output_mask, output_stripped_scan, 
@@ -17,7 +23,11 @@ def apply_synthstrip(input_scan, output_mask, output_stripped_scan,
                      _history=""):
     assert model is not None, "You need to specify model file"
 
-    image, aff = load_minc_volume(input_scan, as_byte=False)
+    if input_scan.endswith(('.nii','.nii.gz')):
+        assert _have_nifti, 'Need nibabel to read .nii files'
+        image, aff = load_nifti_volume(input_scan, as_byte=False)
+    else:
+        image, aff = load_minc_volume_np(input_scan, as_byte=False)
 
     # resample to 1x1x1 if needed
     image_u, aff_u = uniformize_volume(image, aff, tolerance=0.1) 
@@ -69,12 +79,18 @@ def apply_synthstrip(input_scan, output_mask, output_stripped_scan,
     # write the masked output
     if output_stripped_scan is not None:
         image[mask == 0] = np.min([0.0, image.min()])
-        save_minc_volume(image, args.out, aff=aff, history=_history, ref_fname=input_scan)
+        if output_stripped_scan.endswith(('.nii','.nii.gz')):
+            save_nifti_volume(image, output_stripped_scan, aff)
+        else:
+            save_minc_volume(image, output_stripped_scan, aff=aff, history=_history, ref_fname=input_scan)
 
     # write the brain mask
     if output_mask is not None:
         #mask = torch.from_numpy(mask.astype(np.uint8))
-        save_minc_volume( args.mask, mask.astype(np.uint8), aff=aff, history=_history,ref_fname=input_scan)
+        if output_mask.endswith(('.nii','.nii.gz')):
+            save_nifti_volume(output_mask, mask.astype(np.uint8), aff)
+        else:
+            save_minc_volume( output_mask, mask.astype(np.uint8), aff=aff, history=_history,ref_fname=input_scan)
 
 
 ref = '''
