@@ -312,12 +312,17 @@ else:
         #opset_version=11,
         do_constant_folding=True,
         verbose=False,
-        input_names=['scan'], output_names=['seg']
+        input_names=['scan'], 
+        output_names=['dist'],
+        dynamic_axes={'scan':{0:'batch', 2:'x', 3:'y', 4:'z'}, 
+                     'dist': {0:'batch', 2:'x', 3:'y', 4:'z'}},
     )
-    print(f"ONNX model exported to {onnx_path}.")
-    print("Converting to OpenVINO...")
-    from openvino.tools import mo
-    from openvino.runtime import serialize
-    ov_model = mo.convert_model(onnx_path, compress_to_fp16=True)
-    serialize(ov_model, ir_path)
-    print(f"OpenVINO IR model exported to {ir_path}.")
+
+    if False:
+        print(f"ONNX model exported to {onnx_path}.")
+        print("Converting to OpenVINO...")
+        from openvino.tools import mo
+        from openvino.runtime import serialize
+        ov_model = mo.convert_model(onnx_path, compress_to_fp16=True)
+        serialize(ov_model, ir_path)
+        print(f"OpenVINO IR model exported to {ir_path}.")

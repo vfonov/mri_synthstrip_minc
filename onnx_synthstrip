@@ -1,0 +1,129 @@
+#!/usr/bin/env python 
+
+import os
+import sys
+import argparse
+from scipy.ndimage  import label
+from scipy.ndimage  import distance_transform_edt
+import numpy as np
+
+from minc.io import *
+from minc.geo import *
+
+import onnxruntime
+
+def apply_synthstrip(input_scan, output_mask, output_stripped_scan, 
+                     model=None, size_quant=64,
+                     _history=""):
+    assert model is not None, "You need to specify model file"
+
+    image, aff = load_minc_volume(input_scan, as_byte=False)
+
+    # resample to 1x1x1 if needed
+    image_u, aff_u = uniformize_volume(image, aff, tolerance=0.1) 
+
+    # TODO: maybe allow trimming here?
+    target_shape = np.clip(np.ceil(np.array(image_u.shape[:3]) / size_quant).astype(int) * size_quant, 192, 320)
+
+    if np.any(target_shape != image_u.shape[:3]):
+        conformed = np.zeros(target_shape, dtype='float32')
+        conformed[:image_u.shape[0], :image_u.shape[1], :image_u.shape[2]] = image_u
+    else:
+        conformed = image_u.astype('float32') # to be compatible with spatial expectation of the model
+
+    # normalize intensities
+    conformed -= conformed.min()
+    conformed = np.clip(conformed / np.percentile(conformed,99),0, 1)
+    
+    conformed=np.ascontiguousarray(conformed.transpose([2,0,1])[:,::-1,:]) # convert to freesurfer format
+
+    # predict the surface distance transform
+    sdt_full = model.run(['dist'],{'scan':conformed[None,None,:,:,:]})[0]
+    sdt_full = np.ascontiguousarray(sdt_full[0,0,:,::-1,:].transpose([1,2,0])) # convert back to minc convention
+
+    max_dist = sdt_full.max().astype(int)
+    if args.border >= max_dist:
+        print(f'specified border {args.border} greater than max dtrans {max_dist} - computing sdt')
+        dif = args.border - (max_dist-1)
+        mask1 = (sdt_full >= (max_dist-1))  # region that original sdt has real distances
+        dtrans = distance_transform_edt(mask1) + (max_dist-2)
+        sdt_full = dtrans  # negative interior distances are lost, but doesn't matter
+        max_dist=args.border
+
+    # unconform the sdt and extract mask
+    if np.any(target_shape != image_u.shape[:3]):
+        sdt = sdt_full[:image_u.shape[0], :image_u.shape[1], :image_u.shape[2]]
+    else:
+        sdt = sdt_full
+
+    # downsample
+    if np.any(aff_u != aff):
+        sdt = resample_volume(sdt, aff_u, image.shape, aff, order=1, fill=max_dist)[0]
+
+    # find largest CC to be safe
+    structure = np.ones((3, 3, 3), dtype=np.int32)
+    labeled, ncomponents = label((sdt < args.border), structure)
+
+    mask=(labeled==1).astype(np.uint8)
+
+    # write the masked output
+    if output_stripped_scan is not None:
+        image[mask == 0] = np.min([0.0, image.min()])
+        save_minc_volume(image, args.out, aff=aff, history=_history, ref_fname=input_scan)
+
+    # write the brain mask
+    if output_mask is not None:
+        #mask = torch.from_numpy(mask.astype(np.uint8))
+        save_minc_volume( args.mask, mask.astype(np.uint8), aff=aff, history=_history,ref_fname=input_scan)
+
+
+ref = '''
+If you use SynthStrip in your analysis, please cite:
+----------------------------------------------------
+SynthStrip: Skull-Stripping for Any Brain Image
+A Hoopes, JS Mora, AV Dalca, B Fischl, M Hoffmann
+NeuroImage 206 (2022), 119474
+https://doi.org/10.1016/j.neuroimage.2022.119474 
+
+Website: https://w3id.org/synthstrip
+'''
+
+_history=format_history(sys.argv)
+
+
+# parse command line
+parser = argparse.ArgumentParser()
+parser.add_argument('image', metavar='file', help='Input image to skullstrip.')
+parser.add_argument('-m', '--mask',  metavar='file', help='Save binary brain mask to path.')
+parser.add_argument('-o', '--out', metavar='file', help='Save stripped image to path.')
+parser.add_argument('-b', '--border', default=1, type=int, help='Mask border threshold in mm. Default is 1.')
+parser.add_argument('-t', '--threads', default=0, type=int, help='number of threads to use. Default is 0 (all).')
+#parser.add_argument('--no-csf', action='store_true', help='Exclude CSF from brain border.')
+parser.add_argument('--model', metavar='file', help='Alternative model weights.',required=True)
+if len(sys.argv) == 1 or '-h' in sys.argv or '--help' in sys.argv:
+    print('Robust, universal skull-stripping for brain images of any type, ')
+    parser.print_help()
+    print(ref)
+    exit(1)
+args = parser.parse_args()
+
+
+# sanity check on the inputs
+if not args.out and not args.mask:
+    assert False,'Must provide at least --out or --mask output flags.'
+
+# load model weights
+if args.model is not None:
+    modelfile = args.model
+else:
+    assert False, "You need to specify model file"
+
+sess_options = onnxruntime.SessionOptions()
+if args.threads>0:
+    sess_options.intra_op_num_threads = args.threads
+
+model = onnxruntime.InferenceSession(args.model, sess_options, providers=['CPUExecutionProvider'])
+
+# TODO: allow using nibabel 
+# load input volume
+apply_synthstrip(args.image, args.mask, args.out, model=model,_history=_history)
